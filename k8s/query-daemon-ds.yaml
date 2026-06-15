@@ -1,0 +1,65 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: query-daemon
+  namespace: default
+  labels:
+    app: query-daemon
+spec:
+  selector:
+    matchLabels:
+      name: query-daemon
+  template:
+    metadata:
+      labels:
+        name: query-daemon
+    spec:
+      containers:
+      - name: query-daemon
+        image: ghcr.io/suprath/greengate-daemon:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8080
+          name: query-port
+        securityContext:
+          capabilities:
+            add:
+            - IPC_LOCK
+        env:
+        - name: PORT
+          value: "8080"
+        - name: CACHE_DIR
+          value: "/var/cache/greengate"
+        - name: S3_ENDPOINT
+          value: "http://minio-service:9000"
+        - name: S3_BUCKET
+          value: "greengate"
+        volumeMounts:
+        - name: cache-volume
+          mountPath: /var/cache/greengate
+        resources:
+          limits:
+            memory: 4Gi
+            cpu: "2"
+          requests:
+            memory: 1Gi
+            cpu: "500m"
+      volumes:
+      - name: cache-volume
+        hostPath:
+          path: /mnt/greengate_cache
+          type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: query-daemon-service
+  namespace: default
+spec:
+  ports:
+  - port: 8080
+    targetPort: 8080
+    protocol: TCP
+  selector:
+    name: query-daemon
+  type: ClusterIP

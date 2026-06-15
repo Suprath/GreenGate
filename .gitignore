@@ -1,0 +1,19 @@
+# Build directories
+build/
+build_daemon/
+build_client/
+aarchgate/build/
+dist/
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+# IDEs and editors
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Caches and temporary storage
+/tmp/greengate_cache/

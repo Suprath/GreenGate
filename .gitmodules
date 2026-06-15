@@ -1,0 +1,3 @@
+[submodule "aarchgate"]
+	path = aarchgate
+	url = https://github.com/Suprath/AarchGate.git
