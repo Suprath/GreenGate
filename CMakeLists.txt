@@ -67,3 +67,31 @@ target_link_libraries(green_gate_benchmark PRIVATE
     Arrow::arrow_shared
     CURL::libcurl
 )
+
+add_executable(green_gate_phase1_test
+    src/lex/ingest/simd_transposer.cpp
+    src/lex/ingest/adaptive_ingester.cpp
+    src/lex/storage/exporter.cpp
+    tests/transposer_test.cpp
+)
+target_compile_options(green_gate_phase1_test PRIVATE -O3 -ffast-math -Wall -Wextra)
+target_link_libraries(green_gate_phase1_test PRIVATE 
+    aarchgate
+    Arrow::arrow_shared
+)
+
+add_executable(green_gate_phase2_test
+    src/lex/ingest/simd_transposer.cpp
+    src/lex/ingest/adaptive_ingester.cpp
+    src/lex/storage/exporter.cpp
+    src/lex/jit/micro_op_compiler.cpp
+    src/lex/jit/query_planner.cpp
+    tests/jit_string_test.cpp
+)
+target_compile_options(green_gate_phase2_test PRIVATE -O3 -ffast-math -Wall -Wextra)
+target_link_libraries(green_gate_phase2_test PRIVATE 
+    aarchgate
+    asmjit
+    Arrow::arrow_shared
+)
+
