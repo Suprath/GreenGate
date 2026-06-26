@@ -62,6 +62,9 @@ std::vector<uint8_t> Exporter::Serialize(const RowGroup& rg) {
             buffer.insert(buffer.end(), tile_ptr, tile_ptr + sizeof(CbstTile));
         }
         
+        // Write delete mask (8 bytes)
+        append_uint64(block.delete_mask);
+        
         // Write tail size and tail payload
         uint64_t tail_size = block.tail_payload.size();
         append_uint64(tail_size);
@@ -71,8 +74,8 @@ std::vector<uint8_t> Exporter::Serialize(const RowGroup& rg) {
         }
         
         // Pad block to 64-byte boundary
-        // 8 bytes (tail_size) + tail_size bytes (tail_payload) + padding_len must be multiple of 64
-        size_t tail_section_len = 8 + tail_size;
+        // 8 bytes (delete_mask) + 8 bytes (tail_size) + tail_size bytes (tail_payload) + padding_len must be multiple of 64
+        size_t tail_section_len = 8 + 8 + tail_size;
         size_t block_padding_len = (64 - (tail_section_len % 64)) % 64;
         if (block_padding_len > 0) {
             buffer.insert(buffer.end(), block_padding_len, 0);
@@ -149,6 +152,13 @@ RowGroup Exporter::Deserialize(const std::vector<uint8_t>& data) {
             offset += sizeof(CbstTile);
         }
         
+        // Read delete mask
+        if (offset + 8 > data.size()) {
+            throw std::runtime_error("Malformed CBST data: block delete mask bounds check failed");
+        }
+        std::memcpy(&block.delete_mask, data.data() + offset, 8);
+        offset += 8;
+        
         // Read tail size and payload
         if (offset + 8 > data.size()) {
             throw std::runtime_error("Malformed CBST data: block tail size bounds check failed");
@@ -168,7 +178,7 @@ RowGroup Exporter::Deserialize(const std::vector<uint8_t>& data) {
         }
         
         // Skip block padding to 64-byte boundary
-        size_t tail_section_len = 8 + tail_size;
+        size_t tail_section_len = 8 + 8 + tail_size;
         size_t block_padding_len = (64 - (tail_section_len % 64)) % 64;
         offset += block_padding_len;
     }

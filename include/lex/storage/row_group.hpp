@@ -8,6 +8,7 @@ namespace greengate {
 struct BlockData {
     std::vector<CbstTile> columns; // One tile per column in this block
     std::vector<char> tail_payload; // Padded raw string bytes / variable-length data
+    uint64_t delete_mask = ~0ULL;   // 64-bit tombstone mask (1 = active, 0 = deleted)
 };
 
 struct RowGroup {

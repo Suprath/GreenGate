@@ -1,4 +1,5 @@
 #include "lex/jit/query_planner.hpp"
+#include "lex/lsm/metadata_registry.hpp"
 #include <stdexcept>
 #include <cstring>
 #include <iostream>
@@ -45,7 +46,7 @@ uint64_t QueryRunner::Execute(const RowGroup& rg, uint64_t& out_agg_sum) {
         size_t rows_in_block = std::min(size_t(64), rg.num_rows - b * 64);
         
         // 1. Run JIT block scan (filters numerical, and checks skeleton + KIM signature)
-        uint64_t candidate_mask = scan_func(block.columns.data(), block.tail_payload.data(), materialized_dest);
+        uint64_t candidate_mask = scan_func(block.columns.data(), block.tail_payload.data(), materialized_dest, block.delete_mask);
         
         // Mask out rows beyond rows_in_block (for the last block)
         if (rows_in_block < 64) {
@@ -267,10 +268,39 @@ uint64_t QueryRunner::Execute(const RowGroup& rg, uint64_t& out_agg_sum) {
     return total_matches;
 }
 
+uint64_t QueryRunner::Execute(const TableState& state, uint64_t& out_agg_sum) {
+    uint64_t total_matches = 0;
+    out_agg_sum = 0;
+
+    // 1. Scan persisted RowGroups
+    for (const auto& rg : state.persisted_groups) {
+        uint64_t local_sum = 0;
+        total_matches += Execute(*rg, local_sum);
+        out_agg_sum += local_sum;
+    }
+
+    // 2. Scan active MemTable
+    if (state.active_memtable) {
+        uint64_t local_sum = 0;
+        total_matches += state.active_memtable->ExecuteQuery(all_predicates, agg_col_name, local_sum);
+        out_agg_sum += local_sum;
+    }
+
+    // 3. Scan frozen MemTable (if exists during concurrent compaction)
+    if (state.frozen_memtable) {
+        uint64_t local_sum = 0;
+        total_matches += state.frozen_memtable->ExecuteQuery(all_predicates, agg_col_name, local_sum);
+        out_agg_sum += local_sum;
+    }
+
+    return total_matches;
+}
+
 QueryRunner QueryPlanner::Plan(const std::vector<Predicate>& predicates, 
                               const RowGroup& rg, 
                               const std::string& agg_column_name) {
     QueryRunner runner;
+    runner.all_predicates = predicates;
     std::vector<MicroOp> ops;
     
     // Identify all string columns in the original schema (to map their relative index)
@@ -450,6 +480,7 @@ QueryRunner QueryPlanner::Plan(const std::vector<Predicate>& predicates,
     if (!agg_column_name.empty()) {
         size_t p_agg = get_physical_idx(agg_column_name);
         runner.agg_col_idx = static_cast<int>(p_agg);
+        runner.agg_col_name = agg_column_name;
         
         int max_agg_bit = 0;
         for (int bit = 63; bit >= 0; --bit) {

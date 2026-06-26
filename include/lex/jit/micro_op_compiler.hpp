@@ -33,7 +33,7 @@ struct MicroOp {
 // tail_payload points to the variable length data.
 // materialized_dest points to a buffer of 64 uint64_t elements.
 // Returns a 64-bit match mask.
-using BlockScanFunc = uint64_t (*)(const CbstTile* tiles, const char* tail_payload, uint64_t* materialized_dest);
+using BlockScanFunc = uint64_t (*)(const CbstTile* tiles, const char* tail_payload, uint64_t* materialized_dest, uint64_t delete_mask);
 
 class MicroOpCompiler {
 public:

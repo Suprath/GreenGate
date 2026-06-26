@@ -64,13 +64,32 @@ static size_t ReadCallback(char* buffer, size_t size, size_t nitems, void* userd
     return to_copy;
 }
 
+static std::string GetS3Url(const std::string& endpoint, const std::string& bucket, const std::string& key) {
+    size_t suffix_pos = bucket.find("--");
+    if (suffix_pos != std::string::npos && bucket.rfind("--x-s3") == bucket.size() - 6) {
+        std::string az_id = bucket.substr(suffix_pos + 2, bucket.size() - suffix_pos - 8);
+        std::string region = "us-east-1";
+        if (az_id.compare(0, 4, "use1") == 0) region = "us-east-1";
+        else if (az_id.compare(0, 4, "use2") == 0) region = "us-east-2";
+        else if (az_id.compare(0, 4, "usw1") == 0) region = "us-west-1";
+        else if (az_id.compare(0, 4, "usw2") == 0) region = "us-west-2";
+        
+        if (endpoint.find("amazonaws.com") != std::string::npos) {
+            return "https://" + bucket + ".s3express-" + az_id + "." + region + ".amazonaws.com/" + key;
+        }
+    }
+    
+    std::string url = endpoint;
+    if (url.back() != '/') url += '/';
+    url += bucket + "/" + key;
+    return url;
+}
+
 bool S3Writer::UploadToS3(const std::string& s3_key, const uint8_t* data, size_t size) {
     CURL* curl = curl_easy_init();
     if (!curl) return false;
 
-    std::string url = endpoint_;
-    if (url.back() != '/') url += '/';
-    url += bucket_ + "/" + s3_key;
+    std::string url = GetS3Url(endpoint_, bucket_, s3_key);
 
     ReadBuffer ubuf{data, size, 0};
 

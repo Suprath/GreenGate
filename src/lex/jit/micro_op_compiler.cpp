@@ -34,6 +34,9 @@ BlockScanFunc MicroOpCompiler::Compile(const std::vector<MicroOp>& ops) {
     a.stp(x23, x24, Mem(sp, -16).pre());
     a.stp(x25, x26, Mem(sp, -16).pre());
     a.stp(x27, x28, Mem(sp, -16).pre());
+    
+    // Save delete_mask (x3) on the stack
+    a.str(x3, Mem(sp, -16).pre());
 
     // Parameters: x0 = tiles, x1 = tail_payload, x2 = materialized_dest
     // Copy parameters to callee-saved registers
@@ -395,12 +398,18 @@ BlockScanFunc MicroOpCompiler::Compile(const std::vector<MicroOp>& ops) {
         }
     }
 
-    // Move final result register value to x0
+    // Move final result register value to x0 and apply delete mask
     if (!ops.empty()) {
-        a.mov(x0, get_reg(ops.back().dest_reg));
+        Gp res = get_reg(ops.back().dest_reg);
+        // Load delete_mask from stack (at offset 0 from sp)
+        a.ldr(x8, Mem(sp, 0));
+        a.and_(x0, res, x8);
     } else {
         a.mov(x0, xzr);
     }
+
+    // Pop delete_mask from stack
+    a.add(sp, sp, 16);
 
     // Restore callee-saved registers and return
     a.ldp(x27, x28, Mem(sp).post(16));
