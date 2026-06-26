@@ -46,10 +46,14 @@ public:
     int GetNodeId() const { return node_id_; }
     SrdTransport& GetTransport() { return transport_; }
 
+    std::string GetAvailabilityZone() const { return availability_zone_; }
+    void SetAvailabilityZone(const std::string& az) { availability_zone_ = az; }
+
 private:
     int node_id_;
     int num_nodes_;
     SrdTransport transport_;
+    std::string availability_zone_;
 
     // Keep Arrow batches for zero-copy lookup during verification/materialization
     std::vector<std::shared_ptr<arrow::RecordBatch>> left_batches_;
@@ -88,6 +92,14 @@ public:
                               const std::string& left_join_col, const std::string& right_join_col,
                               const std::vector<Predicate>& left_preds, const std::vector<Predicate>& right_preds,
                               const std::string& agg_col, uint64_t& out_agg_sum);
+
+    QueryResult ExecuteJoinQueryExtended(const std::string& left_table, const std::string& right_table,
+                                         const std::string& left_join_col, const std::string& right_join_col,
+                                         const std::vector<Predicate>& left_preds, const std::vector<Predicate>& right_preds,
+                                         const std::string& agg_col, AggregationType agg_type);
+
+    std::string GetS3ExpressBucketAZ(const std::string& bucket_name) const;
+    int ScheduleTask(const std::string& bucket_name) const;
 
     std::vector<std::unique_ptr<ClusterNode>>& GetNodes() { return nodes_; }
 

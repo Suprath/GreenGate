@@ -19,6 +19,10 @@ public:
     // Trigger compaction immediately (synchronous for testing/daemon loop)
     void TriggerCompaction();
 
+    static void RecordColumnAccess(const std::string& col_name);
+    static uint64_t GetColumnAccessCount(const std::string& col_name);
+    static void ClearColumnAccessCounts();
+
 private:
     void DaemonLoop();
 

@@ -1,9 +1,13 @@
 #include "lex/jit/query_planner.hpp"
 #include "lex/lsm/metadata_registry.hpp"
+#include "lex/ingest/simd_transposer.hpp"
+#include "lex/lsm/promotion_daemon.hpp"
 #include <stdexcept>
 #include <cstring>
 #include <iostream>
 #include <string_view>
+#include <unordered_set>
+#include <algorithm>
 
 namespace greengate {
 
@@ -268,6 +272,391 @@ uint64_t QueryRunner::Execute(const RowGroup& rg, uint64_t& out_agg_sum) {
     return total_matches;
 }
 
+QueryResult QueryRunner::ExecuteQueryResult(const RowGroup& rg) {
+    QueryResult res;
+    res.count = 0;
+    res.sum = 0;
+    
+    std::vector<int64_t> matched_numerics;
+    std::vector<std::string> matched_strings;
+    
+    alignas(64) uint64_t materialized_dest[64];
+    size_t num_blocks = rg.blocks.size();
+    
+    bool is_agg_str = false;
+    size_t agg_str_col_idx = 0;
+    
+    if (agg_col_idx != -1) {
+        if (rg.column_types[agg_col_idx] == 13) {
+            is_agg_str = true;
+            size_t str_count = 0;
+            for (int i = 0; i < agg_col_idx; ++i) {
+                if (rg.column_types[i] == 13) {
+                    str_count++;
+                }
+            }
+            agg_str_col_idx = str_count;
+        }
+    }
+    
+    for (size_t b = 0; b < num_blocks; ++b) {
+        const auto& block = rg.blocks[b];
+        size_t rows_in_block = std::min(size_t(64), rg.num_rows - b * 64);
+        
+        uint64_t candidate_mask = scan_func(block.columns.data(), block.tail_payload.data(), materialized_dest, block.delete_mask);
+        
+        if (rows_in_block < 64) {
+            uint64_t valid_rows_mask = (1ULL << rows_in_block) - 1;
+            candidate_mask &= valid_rows_mask;
+        }
+        
+        if (candidate_mask == 0) continue;
+        
+        uint64_t final_mask = 0;
+        const char* tail_ptr = block.tail_payload.data();
+        uint64_t num_strings = 0;
+        const uint64_t* offsets = nullptr;
+        const char* data_start = nullptr;
+        if (tail_ptr) {
+            std::memcpy(&num_strings, tail_ptr, sizeof(uint64_t));
+            offsets = reinterpret_cast<const uint64_t*>(tail_ptr + sizeof(uint64_t));
+            data_start = tail_ptr + sizeof(uint64_t) + (num_strings + 1) * sizeof(uint64_t);
+        }
+        
+        if (string_predicates.empty()) {
+            final_mask = candidate_mask;
+        } else if (string_predicates.size() == 1) {
+            const auto& pred = string_predicates[0];
+            std::string_view clean_pat = clean_string_patterns[0];
+            size_t base_idx = string_col_indices[0] * rows_in_block;
+            
+            if (pred.op == PredicateOp::EQ) {
+                uint64_t temp_mask = candidate_mask;
+                const uint64_t* block_offsets = &offsets[base_idx];
+                size_t pat_len = clean_pat.size();
+                const char* pat_data = clean_pat.data();
+                
+                uint64_t pat_const = 0;
+                if (pat_len < 8) {
+                    std::memcpy(&pat_const, pat_data, pat_len);
+                }
+                uint64_t pat_mask = (pat_len >= 8) ? 0 : (1ULL << (pat_len * 8)) - 1;
+                
+                while (temp_mask > 0) {
+                    int i = __builtin_ctzll(temp_mask);
+                    temp_mask &= temp_mask - 1;
+                    
+                    uint64_t start_off = block_offsets[i];
+                    uint64_t end_off = block_offsets[i + 1];
+                    uint64_t len = end_off - start_off - 1;
+                    
+                    if (len == pat_len) {
+                        if (pat_len < 8) {
+                            uint64_t val = *reinterpret_cast<const uint64_t*>(data_start + start_off);
+                            if ((val & pat_mask) == pat_const) {
+                                final_mask |= (1ULL << i);
+                            }
+                        } else {
+                            if (std::memcmp(data_start + start_off, pat_data, pat_len) == 0) {
+                                final_mask |= (1ULL << i);
+                            }
+                        }
+                    }
+                }
+            } else if (pred.op == PredicateOp::LIKE_PREFIX) {
+                uint64_t temp_mask = candidate_mask;
+                const uint64_t* block_offsets = &offsets[base_idx];
+                size_t pat_len = clean_pat.size();
+                const char* pat_data = clean_pat.data();
+                
+                uint64_t pat_const = 0;
+                if (pat_len < 8) {
+                    std::memcpy(&pat_const, pat_data, pat_len);
+                }
+                uint64_t pat_mask = (pat_len >= 8) ? 0 : (1ULL << (pat_len * 8)) - 1;
+                
+                while (temp_mask > 0) {
+                    int i = __builtin_ctzll(temp_mask);
+                    temp_mask &= temp_mask - 1;
+                    
+                    uint64_t start_off = block_offsets[i];
+                    uint64_t end_off = block_offsets[i + 1];
+                    uint64_t len = end_off - start_off - 1;
+                    
+                    if (len >= pat_len) {
+                        if (pat_len < 8) {
+                            uint64_t val = *reinterpret_cast<const uint64_t*>(data_start + start_off);
+                            if ((val & pat_mask) == pat_const) {
+                                final_mask |= (1ULL << i);
+                            }
+                        } else {
+                            if (std::memcmp(data_start + start_off, pat_data, pat_len) == 0) {
+                                final_mask |= (1ULL << i);
+                            }
+                        }
+                    }
+                }
+            } else if (pred.op == PredicateOp::LIKE_CONTAINS) {
+                uint64_t temp_mask = candidate_mask;
+                const uint64_t* block_offsets = &offsets[base_idx];
+                size_t pat_len = clean_pat.size();
+                
+                while (temp_mask > 0) {
+                    int i = __builtin_ctzll(temp_mask);
+                    temp_mask &= temp_mask - 1;
+                    
+                    uint64_t start_off = block_offsets[i];
+                    uint64_t end_off = block_offsets[i + 1];
+                    uint64_t len = end_off - start_off - 1;
+                    
+                    if (len >= pat_len) {
+                        std::string_view actual_val(data_start + start_off, len);
+                        if (actual_val.find(clean_pat) != std::string_view::npos) {
+                            final_mask |= (1ULL << i);
+                        }
+                    }
+                }
+            }
+        } else {
+            uint64_t temp_mask = candidate_mask;
+            while (temp_mask > 0) {
+                int i = __builtin_ctzll(temp_mask);
+                temp_mask &= temp_mask - 1;
+                
+                bool matched = true;
+                for (size_t p = 0; p < string_predicates.size(); ++p) {
+                    const auto& pred = string_predicates[p];
+                    const auto& clean_pat = clean_string_patterns[p];
+                    size_t str_col_idx = string_col_indices[p];
+                    
+                    const uint64_t* col_offsets = &offsets[str_col_idx * rows_in_block];
+                    uint64_t start_off = col_offsets[i];
+                    uint64_t end_off = col_offsets[i + 1];
+                    uint64_t len = end_off - start_off - 1;
+                    
+                    if (pred.op == PredicateOp::EQ) {
+                        if (len != clean_pat.size()) {
+                            matched = false;
+                            break;
+                        }
+                        if (len < 8) {
+                            uint64_t val = *reinterpret_cast<const uint64_t*>(data_start + start_off);
+                            uint64_t pat_const = 0;
+                            std::memcpy(&pat_const, clean_pat.data(), len);
+                            uint64_t pat_mask = (1ULL << (len * 8)) - 1;
+                            if ((val & pat_mask) != pat_const) {
+                                matched = false;
+                                break;
+                            }
+                        } else {
+                            if (std::memcmp(data_start + start_off, clean_pat.data(), len) != 0) {
+                                matched = false;
+                                break;
+                            }
+                        }
+                    } else if (pred.op == PredicateOp::LIKE_PREFIX) {
+                        if (len < clean_pat.size()) {
+                            matched = false;
+                            break;
+                        }
+                        if (clean_pat.size() < 8) {
+                            uint64_t val = *reinterpret_cast<const uint64_t*>(data_start + start_off);
+                            uint64_t pat_const = 0;
+                            std::memcpy(&pat_const, clean_pat.data(), clean_pat.size());
+                            uint64_t pat_mask = (1ULL << (clean_pat.size() * 8)) - 1;
+                            if ((val & pat_mask) != pat_const) {
+                                matched = false;
+                                break;
+                            }
+                        } else {
+                            if (std::memcmp(data_start + start_off, clean_pat.data(), clean_pat.size()) != 0) {
+                                matched = false;
+                                break;
+                            }
+                        }
+                    } else if (pred.op == PredicateOp::LIKE_CONTAINS) {
+                        if (len < clean_pat.size() || std::string_view(data_start + start_off, len).find(clean_pat) == std::string_view::npos) {
+                            matched = false;
+                            break;
+                        }
+                    }
+                }
+                if (matched) {
+                    final_mask |= (1ULL << i);
+                }
+            }
+        }
+        
+        uint64_t pop = __builtin_popcountll(final_mask);
+        res.count += pop;
+        if (pop == 0) continue;
+        
+        if (agg_col_idx != -1) {
+            if (is_agg_str) {
+                const uint64_t* col_offsets = &offsets[agg_str_col_idx * rows_in_block];
+                uint64_t temp_mask = final_mask;
+                while (temp_mask > 0) {
+                    int i = __builtin_ctzll(temp_mask);
+                    temp_mask &= temp_mask - 1;
+                    
+                    uint64_t start_off = col_offsets[i];
+                    uint64_t end_off = col_offsets[i + 1];
+                    uint64_t len = end_off - start_off - 1;
+                    matched_strings.push_back(std::string(data_start + start_off, len));
+                }
+            } else {
+                greengate_butterfly_transpose(block.columns[agg_col_idx].planes, materialized_dest);
+                uint64_t temp_mask = final_mask;
+                while (temp_mask > 0) {
+                    int i = __builtin_ctzll(temp_mask);
+                    temp_mask &= temp_mask - 1;
+                    int64_t val = static_cast<int64_t>(materialized_dest[i]);
+                    matched_numerics.push_back(val);
+                    res.sum += val;
+                }
+            }
+        }
+    }
+    
+    if (res.count > 0 && agg_col_idx != -1) {
+        if (is_agg_str) {
+            if (!matched_strings.empty()) {
+                std::string min_s = matched_strings[0];
+                std::string max_s = matched_strings[0];
+                for (const auto& s : matched_strings) {
+                    if (s < min_s) min_s = s;
+                    if (s > max_s) max_s = s;
+                }
+                res.min_val = 0;
+                res.max_val = 0;
+                std::unordered_set<std::string> dist_set(matched_strings.begin(), matched_strings.end());
+                res.distinct_count = dist_set.size();
+                res.distinct_strings.assign(dist_set.begin(), dist_set.end());
+            }
+        } else {
+            if (!matched_numerics.empty()) {
+                res.min_val = matched_numerics[0];
+                res.max_val = matched_numerics[0];
+                for (auto val : matched_numerics) {
+                    if (val < res.min_val) res.min_val = val;
+                    if (val > res.max_val) res.max_val = val;
+                }
+                
+                std::unordered_set<int64_t> dist_set(matched_numerics.begin(), matched_numerics.end());
+                res.distinct_count = dist_set.size();
+                res.distinct_numerics.assign(dist_set.begin(), dist_set.end());
+                
+                res.avg = static_cast<double>(res.sum) / matched_numerics.size();
+                
+                std::vector<int64_t> sorted_n = matched_numerics;
+                std::sort(sorted_n.begin(), sorted_n.end());
+                size_t sz = sorted_n.size();
+                if (sz % 2 == 1) {
+                    res.median_val = sorted_n[sz / 2];
+                } else {
+                    res.median_val = (sorted_n[sz / 2 - 1] + sorted_n[sz / 2]) / 2;
+                }
+            }
+        }
+    }
+    
+    return res;
+}
+
+QueryResult QueryRunner::ExecuteQueryResult(const TableState& state) {
+    // Record queries in the auto-pilot system
+    for (const auto& pred : all_predicates) {
+        PromotionDaemon::RecordColumnAccess(pred.column_name);
+    }
+    if (!agg_col_name.empty()) {
+        PromotionDaemon::RecordColumnAccess(agg_col_name);
+    }
+
+    std::vector<QueryResult> results;
+    
+    for (const auto& rg : state.persisted_groups) {
+        results.push_back(ExecuteQueryResult(*rg));
+    }
+    
+    if (state.active_memtable) {
+        results.push_back(state.active_memtable->ExecuteQueryResult(all_predicates, agg_col_name));
+    }
+    
+    if (state.frozen_memtable) {
+        results.push_back(state.frozen_memtable->ExecuteQueryResult(all_predicates, agg_col_name));
+    }
+    
+    QueryResult merged;
+    if (results.empty()) return merged;
+    
+    merged.count = 0;
+    merged.sum = 0;
+    bool first = true;
+    bool is_string = false;
+    
+    if (agg_col_idx != -1) {
+        if (!state.persisted_groups.empty() && state.persisted_groups[0]->column_types[agg_col_idx] == 13) {
+            is_string = true;
+        } else if (state.active_memtable) {
+            auto batches = state.active_memtable->GetBatches();
+            if (!batches.empty()) {
+                auto col = batches[0]->GetColumnByName(agg_col_name);
+                if (col && (col->type_id() == arrow::Type::STRING || col->type_id() == arrow::Type::BINARY)) {
+                    is_string = true;
+                }
+            }
+        }
+    }
+    
+    std::vector<int64_t> all_numerics;
+    std::vector<std::string> all_strings;
+    
+    for (const auto& r : results) {
+        merged.count += r.count;
+        merged.sum += r.sum;
+        if (r.count > 0) {
+            if (first) {
+                merged.min_val = r.min_val;
+                merged.max_val = r.max_val;
+                first = false;
+            } else {
+                if (r.min_val < merged.min_val) merged.min_val = r.min_val;
+                if (r.max_val > merged.max_val) merged.max_val = r.max_val;
+            }
+            all_numerics.insert(all_numerics.end(), r.distinct_numerics.begin(), r.distinct_numerics.end());
+            all_strings.insert(all_strings.end(), r.distinct_strings.begin(), r.distinct_strings.end());
+        }
+    }
+    
+    if (merged.count > 0) {
+        if (!is_string) {
+            if (all_numerics.size() > 0) {
+                merged.avg = static_cast<double>(merged.sum) / all_numerics.size();
+            }
+            
+            std::unordered_set<int64_t> dist_set(all_numerics.begin(), all_numerics.end());
+            merged.distinct_count = dist_set.size();
+            merged.distinct_numerics.assign(dist_set.begin(), dist_set.end());
+            
+            std::sort(all_numerics.begin(), all_numerics.end());
+            size_t sz = all_numerics.size();
+            if (sz > 0) {
+                if (sz % 2 == 1) {
+                    merged.median_val = all_numerics[sz / 2];
+                } else {
+                    merged.median_val = (all_numerics[sz / 2 - 1] + all_numerics[sz / 2]) / 2;
+                }
+            }
+        } else {
+            std::unordered_set<std::string> dist_set(all_strings.begin(), all_strings.end());
+            merged.distinct_count = dist_set.size();
+            merged.distinct_strings.assign(dist_set.begin(), dist_set.end());
+        }
+    }
+    
+    return merged;
+}
+
 uint64_t QueryRunner::Execute(const TableState& state, uint64_t& out_agg_sum) {
     uint64_t total_matches = 0;
     out_agg_sum = 0;
@@ -298,8 +687,10 @@ uint64_t QueryRunner::Execute(const TableState& state, uint64_t& out_agg_sum) {
 
 QueryRunner QueryPlanner::Plan(const std::vector<Predicate>& predicates, 
                               const RowGroup& rg, 
-                              const std::string& agg_column_name) {
+                              const std::string& agg_column_name,
+                              AggregationType agg_type) {
     QueryRunner runner;
+    runner.agg_type = agg_type;
     runner.all_predicates = predicates;
     std::vector<MicroOp> ops;
     

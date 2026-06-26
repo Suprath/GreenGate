@@ -24,6 +24,9 @@ public:
                           const std::string& agg_col_name, 
                           uint64_t& out_agg_sum) const;
 
+    QueryResult ExecuteQueryResult(const std::vector<Predicate>& predicates, 
+                                   const std::string& agg_col_name) const;
+
 private:
     mutable std::mutex mutex_;
     std::vector<std::shared_ptr<arrow::RecordBatch>> batches_;

@@ -6,7 +6,33 @@
 
 extern "C" void greengate_butterfly_transpose(const uint64_t* in_planes, uint64_t* out_scalars) noexcept;
 
+#include <unordered_map>
+#include <mutex>
+
+static std::mutex g_access_mutex;
+static std::unordered_map<std::string, uint64_t> g_column_access_counts;
+
 namespace greengate {
+
+void PromotionDaemon::RecordColumnAccess(const std::string& col_name) {
+    std::lock_guard<std::mutex> lock(g_access_mutex);
+    g_column_access_counts[col_name]++;
+    if (g_column_access_counts[col_name] == 6) { // triggers when crossing threshold of 5
+        std::cout << "[Auto-Pilot] Column '" << col_name << "' query access threshold crossed (Count=" 
+                  << g_column_access_counts[col_name] << "). Broadcasting Promotion Request to cluster..." << std::endl;
+    }
+}
+
+uint64_t PromotionDaemon::GetColumnAccessCount(const std::string& col_name) {
+    std::lock_guard<std::mutex> lock(g_access_mutex);
+    auto it = g_column_access_counts.find(col_name);
+    return (it != g_column_access_counts.end()) ? it->second : 0;
+}
+
+void PromotionDaemon::ClearColumnAccessCounts() {
+    std::lock_guard<std::mutex> lock(g_access_mutex);
+    g_column_access_counts.clear();
+}
 
 PromotionDaemon::PromotionDaemon(const std::string& table_name, size_t memory_threshold_bytes)
     : table_name_(table_name), memory_threshold_(memory_threshold_bytes) {}

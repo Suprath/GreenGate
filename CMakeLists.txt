@@ -135,5 +135,27 @@ target_link_libraries(green_gate_phase4_test PRIVATE
     Arrow::arrow_shared
 )
 
+add_executable(green_gate_phase5_test
+    src/lex/ingest/simd_transposer.cpp
+    src/lex/ingest/adaptive_ingester.cpp
+    src/lex/storage/exporter.cpp
+    src/lex/jit/micro_op_compiler.cpp
+    src/lex/jit/query_planner.cpp
+    src/lex/lsm/mem_table.cpp
+    src/lex/lsm/metadata_registry.cpp
+    src/lex/lsm/promotion_daemon.cpp
+    src/lex/distributed/srd_transport.cpp
+    src/lex/distributed/global_metadata.cpp
+    src/lex/distributed/distributed_coordinator.cpp
+    src/lex/ecosystem/pg_wire_server.cpp
+    tests/ecosystem_test.cpp
+)
+target_compile_options(green_gate_phase5_test PRIVATE -O3 -ffast-math -Wall -Wextra)
+target_link_libraries(green_gate_phase5_test PRIVATE 
+    aarchgate
+    asmjit
+    Arrow::arrow_shared
+)
+
 
 

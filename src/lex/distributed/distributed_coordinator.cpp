@@ -104,7 +104,10 @@ static std::vector<bool> GetMatchingRows(const std::shared_ptr<arrow::RecordBatc
 // ==========================================
 
 ClusterNode::ClusterNode(int node_id, const std::string& host, int port, int num_nodes)
-    : node_id_(node_id), num_nodes_(num_nodes), transport_(node_id, host, port) {}
+    : node_id_(node_id), num_nodes_(num_nodes), transport_(node_id, host, port) {
+    // Assign default Availability Zone based on node_id
+    availability_zone_ = "us-east-1-az" + std::to_string(node_id + 1);
+}
 
 ClusterNode::~ClusterNode() {
     Stop();
@@ -445,6 +448,176 @@ uint64_t DistributedCoordinator::ExecuteJoinQuery(const std::string& left_table,
     }
 
     return total_matches;
+}
+
+QueryResult DistributedCoordinator::ExecuteJoinQueryExtended(const std::string& left_table, const std::string& right_table,
+                                                             const std::string& left_join_col, const std::string& right_join_col,
+                                                             const std::vector<Predicate>& left_preds, const std::vector<Predicate>& right_preds,
+                                                             const std::string& agg_col, AggregationType agg_type) {
+    QueryResult res;
+    res.count = 0;
+    res.sum = 0;
+    (void)agg_type;
+
+    // 1. Prepare JIT filters and signatures on all nodes
+    for (int n = 0; n < num_nodes_; ++n) {
+        nodes_[n]->PrepareJoinSignatures(left_table, right_table, left_preds, right_preds, left_join_col, right_join_col);
+    }
+
+    // 2. Perform global Left Signature Shuffle
+    for (int n = 0; n < num_nodes_; ++n) {
+        nodes_[n]->ShuffleLeftSignatures(node_addresses_);
+    }
+
+    // Barrier: Wait for all Left shuffles to be fully received and reconstructed
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    // Collect Left Signatures on all nodes
+    for (int n = 0; n < num_nodes_; ++n) {
+        nodes_[n]->CollectLeftSignatures();
+    }
+
+    // 3. Perform global Right Signature Shuffle
+    for (int n = 0; n < num_nodes_; ++n) {
+        nodes_[n]->ShuffleRightSignatures(node_addresses_);
+    }
+
+    // Barrier: Wait for all Right shuffles to be fully received and reconstructed
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    // Collect Right Signatures on all nodes
+    for (int n = 0; n < num_nodes_; ++n) {
+        nodes_[n]->CollectRightSignatures();
+    }
+
+    // 4. Local Hash Joins & Deferred String Equi-Join payload verification
+    std::vector<std::pair<uint32_t, uint32_t>> matched_pairs;
+    for (int n = 0; n < num_nodes_; ++n) {
+        auto local_matches = nodes_[n]->PerformLocalJoin();
+        
+        for (const auto& match : local_matches) {
+            uint32_t left_row_id = match.first;
+            uint32_t right_row_id = match.second;
+
+            uint32_t l_node, l_batch, l_row;
+            UnpackRowId(left_row_id, l_node, l_batch, l_row);
+
+            uint32_t r_node, r_batch, r_row;
+            UnpackRowId(right_row_id, r_node, r_batch, r_row);
+
+            std::string l_val = nodes_[l_node]->GetLeftStringVal(left_row_id, left_join_col);
+            std::string r_val = nodes_[r_node]->GetRightStringVal(right_row_id, right_join_col);
+
+            if (l_val == r_val) {
+                matched_pairs.push_back(match);
+            }
+        }
+    }
+
+    res.count = matched_pairs.size();
+    if (res.count == 0 || agg_col.empty()) {
+        return res;
+    }
+
+    // Determine type of agg_col
+    auto state = GlobalMetadata::Instance().GetGlobalState(left_table);
+    bool is_string = false;
+    if (state) {
+        for (size_t i = 0; i < state->column_names.size(); ++i) {
+            if (state->column_names[i] == agg_col) {
+                if (state->column_types[i] == 13) {
+                    is_string = true;
+                }
+                break;
+            }
+        }
+    }
+
+    std::vector<int64_t> matched_numerics;
+    std::vector<std::string> matched_strings;
+    
+    for (const auto& match : matched_pairs) {
+        uint32_t left_row_id = match.first;
+        uint32_t l_node, l_batch, l_row;
+        UnpackRowId(left_row_id, l_node, l_batch, l_row);
+        
+        if (is_string) {
+            std::string s_val = nodes_[l_node]->GetLeftStringVal(left_row_id, agg_col);
+            matched_strings.push_back(s_val);
+        } else {
+            int64_t n_val = nodes_[l_node]->GetLeftNumericVal(left_row_id, agg_col);
+            matched_numerics.push_back(n_val);
+            res.sum += n_val;
+        }
+    }
+    
+    if (is_string) {
+        if (!matched_strings.empty()) {
+            std::string min_s = matched_strings[0];
+            std::string max_s = matched_strings[0];
+            for (const auto& s : matched_strings) {
+                if (s < min_s) min_s = s;
+                if (s > max_s) max_s = s;
+            }
+            res.min_val = 0;
+            res.max_val = 0;
+            std::unordered_set<std::string> dist_set(matched_strings.begin(), matched_strings.end());
+            res.distinct_count = dist_set.size();
+            res.distinct_strings.assign(dist_set.begin(), dist_set.end());
+        }
+    } else {
+        if (!matched_numerics.empty()) {
+            res.min_val = matched_numerics[0];
+            res.max_val = matched_numerics[0];
+            for (auto val : matched_numerics) {
+                if (val < res.min_val) res.min_val = val;
+                if (val > res.max_val) res.max_val = val;
+            }
+            
+            std::unordered_set<int64_t> dist_set(matched_numerics.begin(), matched_numerics.end());
+            res.distinct_count = dist_set.size();
+            res.distinct_numerics.assign(dist_set.begin(), dist_set.end());
+            
+            res.avg = static_cast<double>(res.sum) / matched_numerics.size();
+            
+            std::vector<int64_t> sorted_n = matched_numerics;
+            std::sort(sorted_n.begin(), sorted_n.end());
+            size_t sz = sorted_n.size();
+            if (sz % 2 == 1) {
+                res.median_val = sorted_n[sz / 2];
+            } else {
+                res.median_val = (sorted_n[sz / 2 - 1] + sorted_n[sz / 2]) / 2;
+            }
+        }
+    }
+
+    return res;
+}
+
+std::string DistributedCoordinator::GetS3ExpressBucketAZ(const std::string& bucket_name) const {
+    size_t start = bucket_name.find("--");
+    if (start == std::string::npos) return "";
+    size_t end = bucket_name.find("--x-s3", start + 2);
+    if (end == std::string::npos) return "";
+    return bucket_name.substr(start + 2, end - (start + 2)); // e.g. "use1-az4"
+}
+
+int DistributedCoordinator::ScheduleTask(const std::string& bucket_name) const {
+    std::string bucket_az = GetS3ExpressBucketAZ(bucket_name);
+    if (bucket_az.empty()) {
+        return 0; // default node
+    }
+    for (int n = 0; n < num_nodes_; ++n) {
+        std::string node_az = nodes_[n]->GetAvailabilityZone();
+        size_t node_dash = node_az.find_last_of('-');
+        size_t bucket_dash = bucket_az.find_last_of('-');
+        std::string node_sub = (node_dash != std::string::npos) ? node_az.substr(node_dash + 1) : node_az;
+        std::string bucket_sub = (bucket_dash != std::string::npos) ? bucket_az.substr(bucket_dash + 1) : bucket_az;
+        if (node_sub == bucket_sub || node_az.find(bucket_az) != std::string::npos || bucket_az.find(node_az) != std::string::npos) {
+            return n;
+        }
+    }
+    return 0; // fallback
 }
 
 } // namespace greengate
