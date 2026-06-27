@@ -142,19 +142,12 @@ void PromotionDaemon::TriggerCompaction() {
                 greengate_butterfly_transpose(block.columns[p_idx].planes, block_scalars[col_idx].data());
             }
 
-            // String tail offsets tracking
-            std::vector<size_t> col_tail_str_start(num_logical_cols, 0);
-            size_t current_str_offset = 0;
+            // Count number of string columns and map logical columns to string column index
+            size_t str_col_count = 0;
+            std::vector<size_t> logical_to_str_col_idx(num_logical_cols, 0);
             for (size_t col_idx = 0; col_idx < num_logical_cols; ++col_idx) {
                 if (state->column_types[col_idx] == 13) {
-                    col_tail_str_start[col_idx] = current_str_offset;
-                    size_t p_idx = logical_to_physical[col_idx];
-                    uint64_t validity = block.columns[p_idx].validity;
-                    for (size_t r = 0; r < rows_in_block; ++r) {
-                        if ((validity & (1ULL << r)) != 0) {
-                            current_str_offset++;
-                        }
-                    }
+                    logical_to_str_col_idx[col_idx] = str_col_count++;
                 }
             }
 
@@ -181,8 +174,8 @@ void PromotionDaemon::TriggerCompaction() {
                         } else {
                             if (state->column_types[col_idx] == 13) {
                                 auto s_builder = std::static_pointer_cast<arrow::StringBuilder>(builders[col_idx]);
-                                size_t popcount = __builtin_popcountll(block.columns[p_idx].validity & ((1ULL << r) - 1));
-                                size_t string_idx = col_tail_str_start[col_idx] + popcount;
+                                size_t str_col_idx = logical_to_str_col_idx[col_idx];
+                                size_t string_idx = str_col_idx * rows_in_block + r;
                                 uint64_t start_off = offsets[string_idx];
                                 uint64_t end_off = offsets[string_idx + 1];
                                 std::string_view str_val(data_start + start_off, end_off - start_off - 1);

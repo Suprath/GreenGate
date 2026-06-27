@@ -87,6 +87,8 @@ add_executable(green_gate_phase2_test
     src/lex/jit/micro_op_compiler.cpp
     src/lex/jit/query_planner.cpp
     src/lex/lsm/mem_table.cpp
+    src/lex/lsm/metadata_registry.cpp
+    src/lex/lsm/promotion_daemon.cpp
     tests/jit_string_test.cpp
 )
 target_compile_options(green_gate_phase2_test PRIVATE -O3 -ffast-math -Wall -Wextra)

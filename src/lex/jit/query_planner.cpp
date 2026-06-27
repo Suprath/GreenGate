@@ -2,6 +2,7 @@
 #include "lex/lsm/metadata_registry.hpp"
 #include "lex/ingest/simd_transposer.hpp"
 #include "lex/lsm/promotion_daemon.hpp"
+#include "lex/ingest/adaptive_ingester.hpp"
 #include <stdexcept>
 #include <cstring>
 #include <iostream>
@@ -10,23 +11,6 @@
 #include <algorithm>
 
 namespace greengate {
-
-static uint64_t GenerateKimSignature(std::string_view str) {
-    uint64_t hash = 0xcbf29ce484222325ULL; // FNV-1a offset basis
-    if (str.empty()) return hash;
-    if (str.size() == 1) {
-        hash ^= static_cast<uint8_t>(str[0]);
-        hash *= 0x100000001b3ULL; // FNV-1a prime
-        return hash;
-    }
-    for (size_t i = 0; i < str.size() - 1; ++i) {
-        uint32_t bigram = (static_cast<uint32_t>(static_cast<uint8_t>(str[i])) << 8) | 
-                           static_cast<uint32_t>(static_cast<uint8_t>(str[i+1]));
-        hash ^= bigram;
-        hash *= 0x100000001b3ULL;
-    }
-    return hash;
-}
 
 static uint64_t GetSkeletonConstant(std::string_view str) {
     std::string s(str);
@@ -785,8 +769,8 @@ QueryRunner QueryPlanner::Plan(const std::vector<Predicate>& predicates,
                 
                 int vreg_kim_match = vreg_counter++;
                 uint64_t kim_const = GenerateKimSignature(pred.value);
-                ops.push_back({Opcode::CMP_KIM, vreg_kim_match, vreg_kim_tile, 32, kim_const});
-                std::cout << "  EMIT CMP_KIM dest=" << vreg_kim_match << " src1=" << vreg_kim_tile << " imm=" << kim_const << " bits=32" << std::endl;
+                ops.push_back({Opcode::CMP_KIM, vreg_kim_match, vreg_kim_tile, 64, kim_const});
+                std::cout << "  EMIT CMP_KIM dest=" << vreg_kim_match << " src1=" << vreg_kim_tile << " imm=" << kim_const << " bits=64" << std::endl;
                 
                 int vreg_final_match = vreg_counter++;
                 ops.push_back({Opcode::BIT_AND, vreg_final_match, vreg_skel_match, vreg_kim_match});
@@ -812,8 +796,8 @@ QueryRunner QueryPlanner::Plan(const std::vector<Predicate>& predicates,
                 if (!sub.empty() && sub.back() == '%') sub.pop_back();
                 uint64_t kim_const = GenerateKimSignature(sub);
                 
-                ops.push_back({Opcode::CMP_KIM, vreg_kim_match, vreg_kim_tile, 32, kim_const});
-                std::cout << "  EMIT CMP_KIM dest=" << vreg_kim_match << " src1=" << vreg_kim_tile << " imm=" << kim_const << " bits=32" << std::endl;
+                ops.push_back({Opcode::CMP_KIM, vreg_kim_match, vreg_kim_tile, 64, kim_const});
+                std::cout << "  EMIT CMP_KIM dest=" << vreg_kim_match << " src1=" << vreg_kim_tile << " imm=" << kim_const << " bits=64" << std::endl;
                 predicate_mask_regs.push_back(vreg_kim_match);
             }
         } else {

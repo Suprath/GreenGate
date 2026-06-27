@@ -150,9 +150,9 @@ void TestJitStringContainsMatch() {
     
     for (size_t i = 0; i < num_rows; ++i) {
         std::string s;
-        if (i % 4 == 0) s = "error";
+        if (i % 4 == 0) s = "system_error_log";
         else if (i % 4 == 1) s = "warning_msg";
-        else if (i % 4 == 2) s = "error";
+        else if (i % 4 == 2) s = "error_detected";
         else s = "info";
 
         ref_strings.push_back(s);

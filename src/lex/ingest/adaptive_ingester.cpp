@@ -8,22 +8,31 @@
 
 namespace greengate {
 
-// Helper to generate a 64-bit bigram hash for KIM
-static uint64_t GenerateKimSignature(std::string_view str) {
-    uint64_t hash = 0xcbf29ce484222325ULL; // FNV-1a offset basis
-    if (str.empty()) return hash;
+// Helper to generate a 64-bit Bloom filter of bigrams for KIM
+uint64_t GenerateKimSignature(std::string_view str) {
+    uint64_t signature = 0;
+    if (str.empty()) return signature;
     if (str.size() == 1) {
-        hash ^= static_cast<uint8_t>(str[0]);
-        hash *= 0x100000001b3ULL; // FNV-1a prime
-        return hash;
+        uint8_t ch = static_cast<uint8_t>(str[0]);
+        uint32_t h1 = ch * 17U;
+        uint32_t h2 = ch * 31U + 5U;
+        uint32_t h3 = ch * 127U + 13U;
+        signature |= (1ULL << (h1 % 64));
+        signature |= (1ULL << (h2 % 64));
+        signature |= (1ULL << (h3 % 64));
+        return signature;
     }
     for (size_t i = 0; i < str.size() - 1; ++i) {
         uint32_t bigram = (static_cast<uint32_t>(static_cast<uint8_t>(str[i])) << 8) | 
                            static_cast<uint32_t>(static_cast<uint8_t>(str[i+1]));
-        hash ^= bigram;
-        hash *= 0x100000001b3ULL;
+        uint32_t h1 = bigram * 2654435761U;
+        uint32_t h2 = bigram * 2246822519U + 12345U;
+        uint32_t h3 = bigram * 3266489917U + 67890U;
+        signature |= (1ULL << (h1 % 64));
+        signature |= (1ULL << (h2 % 64));
+        signature |= (1ULL << (h3 % 64));
     }
-    return hash;
+    return signature;
 }
 
 template <typename T>

@@ -6,6 +6,7 @@
 #include <string>
 #include <memory>
 #include <unordered_map>
+#include <unordered_set>
 #include <mutex>
 
 namespace greengate {
@@ -28,9 +29,9 @@ public:
                                const std::string& left_join_col, const std::string& right_join_col);
 
     // Split shuffle execution into stage-wise builder (Left) and prober (Right) phases
-    void ShuffleLeftSignatures(const std::vector<std::pair<std::string, int>>& node_addresses);
+    void ShuffleLeftSignatures(const std::vector<std::pair<std::string, int>>& node_addresses, const std::unordered_set<FatSignature>& global_hot_signatures);
     void CollectLeftSignatures();
-    void ShuffleRightSignatures(const std::vector<std::pair<std::string, int>>& node_addresses);
+    void ShuffleRightSignatures(const std::vector<std::pair<std::string, int>>& node_addresses, const std::unordered_set<FatSignature>& global_hot_signatures);
     void CollectRightSignatures();
 
     // Collect received shuffle datagrams and execute the local hash join
@@ -45,6 +46,7 @@ public:
 
     int GetNodeId() const { return node_id_; }
     SrdTransport& GetTransport() { return transport_; }
+    const std::vector<ShuffleEntry>& GetLocalLeftSignatures() const { return local_left_signatures_; }
 
     std::string GetAvailabilityZone() const { return availability_zone_; }
     void SetAvailabilityZone(const std::string& az) { availability_zone_ = az; }

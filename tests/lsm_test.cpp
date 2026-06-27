@@ -32,14 +32,18 @@ void handler(int sig) {
     exit(1);
 }
 
-static std::shared_ptr<arrow::RecordBatch> CreateBatch(size_t start_idx, size_t num_rows) {
+static std::shared_ptr<arrow::RecordBatch> CreateBatch(size_t start_idx, size_t num_rows, bool inject_nulls = false) {
     std::cout << "    [CreateBatch] Entering with start_idx=" << start_idx << ", num_rows=" << num_rows << std::endl;
     arrow::StringBuilder str_builder;
     arrow::Int64Builder int_builder;
     for (size_t i = 0; i < num_rows; ++i) {
         size_t idx = start_idx + i;
-        std::string s = (idx % 2 == 0) ? "alpha" : "beta";
-        ASSERT_TRUE(str_builder.Append(s).ok());
+        if (inject_nulls && idx % 5 == 0) {
+            ASSERT_TRUE(str_builder.AppendNull().ok());
+        } else {
+            std::string s = (idx % 2 == 0) ? "alpha" : "beta";
+            ASSERT_TRUE(str_builder.Append(s).ok());
+        }
         ASSERT_TRUE(int_builder.Append(static_cast<int64_t>(idx * 10)).ok());
     }
     std::shared_ptr<arrow::Array> str_arr;
@@ -169,7 +173,7 @@ void TestLsmCompaction() {
     auto state = MetadataRegistry::Instance().GetTableState("users_compaction");
 
     // 1. Add some persisted rows (64 rows)
-    auto batch1 = CreateBatch(0, 64);
+    auto batch1 = CreateBatch(0, 64, true);
     AdaptiveIngester ingester;
     RowGroup rg1 = ingester.Ingest(batch1);
     
@@ -183,7 +187,7 @@ void TestLsmCompaction() {
     MetadataRegistry::Instance().UpdateTableState("users_compaction", state2);
 
     // 2. Add some active memtable rows (another 64 rows)
-    auto batch2 = CreateBatch(64, 64);
+    auto batch2 = CreateBatch(64, 64, true);
     MetadataRegistry::Instance().InsertBatch("users_compaction", batch2);
 
     // 3. Mark some persisted rows as deleted
@@ -200,7 +204,8 @@ void TestLsmCompaction() {
     state = MetadataRegistry::Instance().GetTableState("users_compaction");
     uint64_t agg_sum = 0;
     uint64_t matches = runner.Execute(*state, agg_sum);
-    ASSERT_TRUE(matches == 62);
+    std::cout << "  Matches before compaction: " << matches << " (Expected: 49)" << std::endl;
+    ASSERT_TRUE(matches == 49);
 
     // 4. Trigger compaction using PromotionDaemon
     PromotionDaemon daemon("users_compaction", 1024 * 1024);
@@ -219,8 +224,8 @@ void TestLsmCompaction() {
 
     uint64_t agg_sum2 = 0;
     uint64_t matches2 = runner.Execute(*state, agg_sum2);
-    std::cout << "  Matches after compaction: " << matches2 << " (Expected: 62)" << std::endl;
-    ASSERT_TRUE(matches2 == 62);
+    std::cout << "  Matches after compaction: " << matches2 << " (Expected: 49)" << std::endl;
+    ASSERT_TRUE(matches2 == 49);
 
     std::cout << "  -> LSM Compaction Passed!" << std::endl;
 }

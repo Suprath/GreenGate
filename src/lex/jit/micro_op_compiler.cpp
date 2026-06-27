@@ -175,7 +175,7 @@ BlockScanFunc MicroOpCompiler::Compile(const std::vector<MicroOp>& ops) {
 
                 uint64_t signature64 = op.imm;
                 int num_bits = op.src_reg2;
-                if (num_bits <= 0 || num_bits > 64) num_bits = 32; // Default to 32 bits to save overhead
+                if (num_bits <= 0 || num_bits > 64) num_bits = 64; // default to 64 bits to use full Bloom filter
                 
                 int bit = num_bits - 1;
                 for (; bit >= 3; bit -= 4) {
@@ -186,31 +186,26 @@ BlockScanFunc MicroOpCompiler::Compile(const std::vector<MicroOp>& ops) {
                     
                     // Bit 0
                     uint64_t c0 = (signature64 >> bit) & 1;
-                    if (c0 == 0) a.bic(eq, eq, tmp0);
-                    else a.and_(eq, eq, tmp0);
+                    if (c0 == 1) a.and_(eq, eq, tmp0);
                     
                     // Bit 1
                     uint64_t c1 = (signature64 >> (bit - 1)) & 1;
-                    if (c1 == 0) a.bic(eq, eq, tmp1);
-                    else a.and_(eq, eq, tmp1);
+                    if (c1 == 1) a.and_(eq, eq, tmp1);
                     
                     // Bit 2
                     uint64_t c2 = (signature64 >> (bit - 2)) & 1;
-                    if (c2 == 0) a.bic(eq, eq, tmp2);
-                    else a.and_(eq, eq, tmp2);
+                    if (c2 == 1) a.and_(eq, eq, tmp2);
                     
                     // Bit 3
                     uint64_t c3 = (signature64 >> (bit - 3)) & 1;
-                    if (c3 == 0) a.bic(eq, eq, tmp3);
-                    else a.and_(eq, eq, tmp3);
+                    if (c3 == 1) a.and_(eq, eq, tmp3);
                 }
                 
                 // Cleanup remaining bits
                 for (; bit >= 0; --bit) {
                     a.ldr(tmp0, Mem(tile_addr, bit * 8));
                     uint64_t c = (signature64 >> bit) & 1;
-                    if (c == 0) a.bic(eq, eq, tmp0);
-                    else a.and_(eq, eq, tmp0);
+                    if (c == 1) a.and_(eq, eq, tmp0);
                 }
                 break;
             }

@@ -1,8 +1,11 @@
 #pragma once
 #include <arrow/api.h>
 #include "lex/storage/row_group.hpp"
+#include <string_view>
 
 namespace greengate {
+
+uint64_t GenerateKimSignature(std::string_view str);
 
 class AdaptiveIngester {
 public:

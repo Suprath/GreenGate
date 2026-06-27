@@ -17,22 +17,6 @@ static uint64_t GenerateXorSum(std::string_view str) {
     return hash;
 }
 
-static uint64_t GenerateKimSignature(std::string_view str) {
-    uint64_t hash = 0xcbf29ce484222325ULL;
-    if (str.empty()) return hash;
-    if (str.size() == 1) {
-        hash ^= static_cast<uint8_t>(str[0]);
-        hash *= 0x100000001b3ULL;
-        return hash;
-    }
-    for (size_t i = 0; i < str.size() - 1; ++i) {
-        uint32_t bigram = (static_cast<uint32_t>(static_cast<uint8_t>(str[i])) << 8) | 
-                           static_cast<uint32_t>(static_cast<uint8_t>(str[i+1]));
-        hash ^= bigram;
-        hash *= 0x100000001b3ULL;
-    }
-    return hash;
-}
 
 static uint32_t PackRowId(uint32_t node_id, uint32_t batch_idx, uint32_t row_idx) {
     return (node_id << 24) | (batch_idx << 12) | row_idx;
@@ -180,26 +164,13 @@ void ClusterNode::PrepareJoinSignatures(const std::string& left_table, const std
               << local_left_signatures_.size() << " R=" << local_right_signatures_.size() << std::endl;
 }
 
-void ClusterNode::ShuffleLeftSignatures(const std::vector<std::pair<std::string, int>>& node_addresses) {
+void ClusterNode::ShuffleLeftSignatures(const std::vector<std::pair<std::string, int>>& node_addresses, const std::unordered_set<FatSignature>& global_hot_signatures) {
     received_left_signatures_.clear();
 
-    // 1. Detect Skew in local Left table partition
-    std::unordered_map<FatSignature, int> signature_counts;
-    for (const auto& entry : local_left_signatures_) {
-        signature_counts[entry.sig]++;
-    }
-
-    std::unordered_set<FatSignature> hot_signatures;
-    for (const auto& pair : signature_counts) {
-        if (pair.second > 16) {
-            hot_signatures.insert(pair.first);
-        }
-    }
-
-    // 2. Shuffle Left Signatures (Build Side)
+    // 2. Shuffle Left Signatures (Build Side) using global consensus set
     std::vector<std::vector<ShuffleEntry>> left_sends(num_nodes_);
     for (const auto& entry : local_left_signatures_) {
-        if (hot_signatures.count(entry.sig)) {
+        if (global_hot_signatures.count(entry.sig)) {
             // Replicate hot keys to ALL nodes
             for (int n = 0; n < num_nodes_; ++n) {
                 left_sends[n].push_back(entry);
@@ -224,26 +195,13 @@ void ClusterNode::CollectLeftSignatures() {
     }
 }
 
-void ClusterNode::ShuffleRightSignatures(const std::vector<std::pair<std::string, int>>& node_addresses) {
+void ClusterNode::ShuffleRightSignatures(const std::vector<std::pair<std::string, int>>& node_addresses, const std::unordered_set<FatSignature>& global_hot_signatures) {
     received_right_signatures_.clear();
 
-    // 1. Detect Skew in local Left table partition (same hot keys detected)
-    std::unordered_map<FatSignature, int> signature_counts;
-    for (const auto& entry : local_left_signatures_) {
-        signature_counts[entry.sig]++;
-    }
-
-    std::unordered_set<FatSignature> hot_signatures;
-    for (const auto& pair : signature_counts) {
-        if (pair.second > 16) {
-            hot_signatures.insert(pair.first);
-        }
-    }
-
-    // 2. Shuffle Right Signatures (Probe Side)
+    // 2. Shuffle Right Signatures (Probe Side) using global consensus set
     std::vector<std::vector<ShuffleEntry>> right_sends(num_nodes_);
     for (const auto& entry : local_right_signatures_) {
-        if (hot_signatures.count(entry.sig)) {
+        if (global_hot_signatures.count(entry.sig)) {
             // Distribute probe side of hot keys using Virtual Partition ID (batch index)
             uint32_t node_id, batch_idx, row_idx;
             UnpackRowId(entry.row_id, node_id, batch_idx, row_idx);
@@ -394,9 +352,23 @@ uint64_t DistributedCoordinator::ExecuteJoinQuery(const std::string& left_table,
         nodes_[n]->PrepareJoinSignatures(left_table, right_table, left_preds, right_preds, left_join_col, right_join_col);
     }
 
+    // Compute global hot signatures consensus set
+    std::unordered_map<FatSignature, int> global_counts;
+    for (int n = 0; n < num_nodes_; ++n) {
+        for (const auto& entry : nodes_[n]->GetLocalLeftSignatures()) {
+            global_counts[entry.sig]++;
+        }
+    }
+    std::unordered_set<FatSignature> global_hot_signatures;
+    for (const auto& pair : global_counts) {
+        if (pair.second > 16) {
+            global_hot_signatures.insert(pair.first);
+        }
+    }
+
     // 2. Perform global Left Signature Shuffle
     for (int n = 0; n < num_nodes_; ++n) {
-        nodes_[n]->ShuffleLeftSignatures(node_addresses_);
+        nodes_[n]->ShuffleLeftSignatures(node_addresses_, global_hot_signatures);
     }
 
     // Barrier: Wait for all Left shuffles to be fully received and reconstructed
@@ -409,7 +381,7 @@ uint64_t DistributedCoordinator::ExecuteJoinQuery(const std::string& left_table,
 
     // 3. Perform global Right Signature Shuffle
     for (int n = 0; n < num_nodes_; ++n) {
-        nodes_[n]->ShuffleRightSignatures(node_addresses_);
+        nodes_[n]->ShuffleRightSignatures(node_addresses_, global_hot_signatures);
     }
 
     // Barrier: Wait for all Right shuffles to be fully received and reconstructed
@@ -464,9 +436,23 @@ QueryResult DistributedCoordinator::ExecuteJoinQueryExtended(const std::string& 
         nodes_[n]->PrepareJoinSignatures(left_table, right_table, left_preds, right_preds, left_join_col, right_join_col);
     }
 
+    // Compute global hot signatures consensus set
+    std::unordered_map<FatSignature, int> global_counts;
+    for (int n = 0; n < num_nodes_; ++n) {
+        for (const auto& entry : nodes_[n]->GetLocalLeftSignatures()) {
+            global_counts[entry.sig]++;
+        }
+    }
+    std::unordered_set<FatSignature> global_hot_signatures;
+    for (const auto& pair : global_counts) {
+        if (pair.second > 16) {
+            global_hot_signatures.insert(pair.first);
+        }
+    }
+
     // 2. Perform global Left Signature Shuffle
     for (int n = 0; n < num_nodes_; ++n) {
-        nodes_[n]->ShuffleLeftSignatures(node_addresses_);
+        nodes_[n]->ShuffleLeftSignatures(node_addresses_, global_hot_signatures);
     }
 
     // Barrier: Wait for all Left shuffles to be fully received and reconstructed
@@ -479,7 +465,7 @@ QueryResult DistributedCoordinator::ExecuteJoinQueryExtended(const std::string& 
 
     // 3. Perform global Right Signature Shuffle
     for (int n = 0; n < num_nodes_; ++n) {
-        nodes_[n]->ShuffleRightSignatures(node_addresses_);
+        nodes_[n]->ShuffleRightSignatures(node_addresses_, global_hot_signatures);
     }
 
     // Barrier: Wait for all Right shuffles to be fully received and reconstructed

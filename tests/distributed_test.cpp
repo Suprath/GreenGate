@@ -23,8 +23,8 @@ static std::shared_ptr<arrow::RecordBatch> CreateJoinBatch(size_t start_idx, siz
     for (size_t i = 0; i < num_rows; ++i) {
         size_t idx = start_idx + i;
         std::string s;
-        if (inject_skew && i < 30) {
-            // Skew: first 30 rows have the exact same key "hot_user"
+        if (inject_skew && ((i < 20) || (i >= 50 && i < 60))) {
+            // Skew: 30 rows have the exact same key "hot_user" distributed asymmetrically
             s = "hot_user";
         } else {
             s = "user_" + std::to_string(idx);
@@ -98,22 +98,22 @@ void TestDistributedJoinAndSkewHandling() {
     }
 
     // Expected matches calculation:
-    // Left: 30 "hot_user" rows (indices 0..29). Filter val > 100 leaves indices 11..29 (19 rows).
-    // Right: 30 "hot_user" rows (indices 0..29). Filter val > 150 leaves indices 16..29 (14 rows).
+    // Left: 30 "hot_user" rows (indices 0..19 and 50..59). Filter val > 100 leaves indices 11..19 (9 rows) and 50..59 (10 rows) -> 19 rows.
+    // Right: 30 "hot_user" rows (indices 0..19 and 50..59). Filter val > 150 leaves indices 16..19 (4 rows) and 50..59 (10 rows) -> 14 rows.
     // Skew matches: 19 * 14 = 266.
-    // Left c_val sum for skew matches: 14 * sum(110, 120, ..., 290) = 14 * 3800 = 53200.
+    // Left c_val sum for skew matches: 14 * (sum(110..190) + sum(500..590)) = 14 * 6800 = 95200.
     // 
-    // Cold unique matches: indices 30..199 (170 rows). Since both Left and Right values > 150, all 170 rows match.
+    // Cold unique matches: 170 rows. Since both Left and Right values > 150, all 170 rows match.
     // Cold matches: 170.
-    // Left c_val sum for cold matches: sum(300, 310, ..., 1990) = 194650.
+    // Left c_val sum for cold matches: sum(20..49, 60..199) * 10 = 191650.
     // 
     // Total expected matches = 266 + 170 = 436.
-    // Total expected sum = 53200 + 194650 = 247850.
+    // Total expected sum = 95200 + 191650 = 286850.
     std::cout << "  Distributed Join matches: " << matches << " (Expected: 436)" << std::endl;
-    std::cout << "  Distributed Join agg_sum: " << agg_sum << " (Expected: 247850)" << std::endl;
+    std::cout << "  Distributed Join agg_sum: " << agg_sum << " (Expected: 286850)" << std::endl;
 
     ASSERT_TRUE(matches == 436);
-    ASSERT_TRUE(agg_sum == 247850);
+    ASSERT_TRUE(agg_sum == 286850);
 
     // Calculate baseline traffic if shuffling raw string keys instead of signatures
     // Suppose avg string key size is 12 bytes. With 4-byte row_id, that is 16 bytes.

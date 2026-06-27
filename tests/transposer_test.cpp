@@ -135,10 +135,11 @@ void TestIngesterAndExporter() {
     RowGroup rg = ingester.Ingest(batch);
     
     ASSERT_TRUE(rg.num_rows == num_rows);
-    ASSERT_TRUE(rg.num_columns == 3);
+    ASSERT_TRUE(rg.num_columns == 4);
     ASSERT_TRUE(rg.column_names[0] == "c_int");
     ASSERT_TRUE(rg.column_names[1] == "c_bool");
     ASSERT_TRUE(rg.column_names[2] == "c_str");
+    ASSERT_TRUE(rg.column_names[3] == "c_str_kim");
     
     size_t expected_blocks = (num_rows + 63) / 64; // 3 blocks
     ASSERT_TRUE(rg.blocks.size() == expected_blocks);
